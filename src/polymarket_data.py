@@ -35,8 +35,43 @@ def btc_5m_slug(window_start):
     window_start is the start of the 5-minute window as UTC text, e.g. "2026-10-20 08:55".
     The slug is "btc-updown-5m-" + the start time in Unix seconds.
     """
-    unix_seconds = int(pd.Timestamp(window_start, tz="UTC").timestamp())
+    unix_seconds = int(pd.to_datetime(window_start, utc=True).timestamp())
     return "btc-updown-5m-" + str(unix_seconds)
+
+
+def find_winner(m):
+    """Return "Up" or "Down" for a market from the Gamma API (None if not resolved yet)."""
+    outcomes = json.loads(m["outcomes"])  # e.g. ["Up", "Down"]
+
+    # After resolution, outcomePrices is ["1", "0"] (Up won) or ["0", "1"] (Down won).
+    outcome_prices = json.loads(m.get("outcomePrices") or "[]")
+    if m["closed"] and "1" in outcome_prices:
+        return outcomes[outcome_prices.index("1")]
+    return None
+
+
+def get_btc_5m_winners(start, end):
+    """
+    Get the winner of every Bitcoin 5-minute market between start and end (UTC text).
+
+    Only resolved markets are included.
+    Returns a DataFrame with one row per market and columns:
+      window_start = when the 5-minute window starts
+      winner       = "Up" or "Down"
+    """
+    window_starts = pd.date_range(pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True),
+                                  freq="5min", inclusive="left")
+
+    # The Gamma API lets us ask for up to 100 markets in one call.
+    rows = []
+    for i in range(0, len(window_starts), 100):
+        slugs = [btc_5m_slug(w) for w in window_starts[i:i + 100]]
+        params = [("slug", s) for s in slugs] + [("closed", "true"), ("limit", 100)]
+        for m in get_json(GAMMA_URL + "/markets", params):
+            rows.append({"window_start": pd.Timestamp(m["eventStartTime"]), "winner": find_winner(m)})
+
+    df = pd.DataFrame(rows, columns=["window_start", "winner"]).dropna()
+    return df.sort_values("window_start", ignore_index=True)
 
 
 def get_market(slug):
@@ -56,18 +91,12 @@ def get_market(slug):
         token_ids = json.loads(m["clobTokenIds"])
     outcomes = json.loads(m["outcomes"])  # e.g. ["Up", "Down"]
 
-    # After resolution, outcomePrices is ["1", "0"] (Up won) or ["0", "1"] (Down won).
-    outcome_prices = json.loads(m.get("outcomePrices") or "[]")
-    winner = None
-    if m["closed"] and "1" in outcome_prices:
-        winner = outcomes[outcome_prices.index("1")]
-
     return {
         "question": m["question"],
         "condition_id": m["conditionId"],
         "window_start": pd.Timestamp(m["eventStartTime"]),
         "window_end": pd.Timestamp(m["endDate"]),
-        "winner": winner,
+        "winner": find_winner(m),
         "token_ids": {outcome: str(t) for outcome, t in zip(outcomes, token_ids)},
     }
 
