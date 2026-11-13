@@ -17,7 +17,6 @@ og at det holder på data du **ikke** brukte til å finne regelen.
 
 Hypotesen er bevisst åpen. Velg selv *hva* du ser på (start av vinduet, siste minutt, store BTC-hopp, tid på døgnet …) og *hvordan* (se metodestikkordene nederst).
 
-> ⚠️ Dette er forskning på offentlige data og backtest. Vi handler ikke på Polymarket.
 
 ---
 
