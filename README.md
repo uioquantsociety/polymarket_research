@@ -2,6 +2,7 @@
 
 Fellesprosjekt i UiO Quant Society. Alle jobber med **samme hypotese og samme datakilder**, men velger sin egen vinkling. På neste møte pitcher alle sine funn, og vi velger den beste.
 
+
 ---
 
 ## Hypotesen
