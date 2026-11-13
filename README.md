@@ -36,8 +36,8 @@ Alle jobber i **sitt eget repo**. Etter pitchen flettes det beste inn i `main` h
 1. Trykk **Fork** øverst på GitHub-siden til dette repoet. Da får du en kopi under din egen bruker, og den henger sammen med dette repoet, så det beste enkelt kan flettes inn senere med en pull request.
 2. Klon *ditt eget* repo og installer pakkene (Python 3.10+):
    ```bash
-   git clone https://github.com/<ditt-brukernavn>/polymarkert_strategy.git
-   cd polymarkert_strategy
+   git clone https://github.com/<ditt-brukernavn>/polymarket_research.git
+   cd polymarket_research
    pip install -r requirements.txt
    ```
 3. Jobb fritt i ditt eget repo, og commit og push så ofte du vil.
