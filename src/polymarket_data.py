@@ -1,38 +1,66 @@
 """
-Download public market data from Polymarket (no login or API key needed).
+Download public data about Polymarket's "Bitcoin Up or Down" 5-minute markets.
 
-APIs used (docs: https://docs.polymarket.com):
-  - Gamma API (https://gamma-api.polymarket.com): market information.
-  - CLOB API  (https://clob.polymarket.com): price history and order books.
-  - Data API  (https://data-api.polymarket.com): every single trade.
+No login or API key is needed. All times are in UTC.
 
-All times are in UTC.
+What you can get:
+  Markets
+    get_btc_5m_markets(start, end)  every resolved market in a period, with its winner
+    get_market(slug)                details of one market
+    btc_5m_slug(window_start)       the name (slug) of the market for a window
+  Prices
+    get_price_history(token_id, start, end)  price of "Up" or "Down", one point per minute
+    get_btc_5m_prices(window_start)          "Up" and "Down" prices of one market, per minute
+  Trades
+    get_trades(condition_id)        every single trade in one market, to the second
+  Order book
+    get_order_book(token_id)        current bids and asks (only while the market is open)
 
 Example:
-    prices = get_btc_5m_prices("2026-10-20 08:55")
+    markets = get_btc_5m_markets("2026-10-01", "2026-10-02")
+    trades = get_trades(markets["condition_id"][0])
+
+APIs used (docs: https://docs.polymarket.com):
+  - Gamma API (https://gamma-api.polymarket.com): market information
+  - CLOB API  (https://clob.polymarket.com): price history and order books
+  - Data API  (https://data-api.polymarket.com): trades
 """
 
 import json
+import time
 
 import pandas as pd
 import requests
 
 GAMMA_URL = "https://gamma-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
+DATA_URL = "https://data-api.polymarket.com"
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def get_json(url, params=None):
-    """Send a GET request and return the JSON answer (stops with an error on failure)."""
-    response = requests.get(url, params=params, timeout=30)
-    response.raise_for_status()
-    return response.json()
+    """Send a GET request and return the JSON answer. Tries again if the API is busy or slow."""
+    for attempt in range(5):
+        try:
+            response = requests.get(url, params=params, timeout=30)
+        except requests.exceptions.Timeout:
+            time.sleep(2 * (attempt + 1))
+            continue
+        if response.status_code != 429:  # 429 = "too many requests": wait and try again
+            response.raise_for_status()
+            return response.json()
+        time.sleep(2 * (attempt + 1))
+    raise RuntimeError("No answer from " + url + " after 5 tries")
 
 
 def btc_5m_slug(window_start):
     """
     Build the slug (name) of a "Bitcoin Up or Down" 5-minute market.
 
-    window_start is the start of the 5-minute window as UTC text, e.g. "2026-10-20 08:55".
+    window_start is the start of the 5-minute window, e.g. "2026-10-20 08:55" (UTC).
     The slug is "btc-updown-5m-" + the start time in Unix seconds.
     """
     unix_seconds = int(pd.to_datetime(window_start, utc=True).timestamp())
@@ -50,27 +78,52 @@ def find_winner(m):
     return None
 
 
-def get_btc_5m_winners(start, end):
-    """
-    Get the winner of every Bitcoin 5-minute market between start and end (UTC text).
+def find_token_ids(m):
+    """Return {"Up": token id, "Down": token id} for a market from the Gamma API."""
+    # "v2" markets list their token ids in positionIds, older ones in clobTokenIds (JSON text).
+    if m.get("version") == "v2":
+        token_ids = m["positionIds"]
+    else:
+        token_ids = json.loads(m["clobTokenIds"])
+    outcomes = json.loads(m["outcomes"])  # e.g. ["Up", "Down"]
+    return {outcome: str(t) for outcome, t in zip(outcomes, token_ids)}
 
-    Only resolved markets are included.
+
+# ---------------------------------------------------------------------------
+# Markets
+# ---------------------------------------------------------------------------
+
+def get_btc_5m_markets(start, end):
+    """
+    Get every resolved Bitcoin 5-minute market between start and end (UTC, e.g. "2026-10-01").
+
+    Fast: 100 markets per call, so one month takes a few seconds.
     Returns a DataFrame with one row per market and columns:
-      window_start = when the 5-minute window starts
-      winner       = "Up" or "Down"
+      window_start  = when the 5-minute window starts
+      winner        = "Up" or "Down" (the true answer)
+      condition_id  = id of the market (needed for get_trades)
+      up_token_id   = id of the "Up" token (needed for prices and order books)
+      down_token_id = id of the "Down" token
     """
     window_starts = pd.date_range(pd.to_datetime(start, utc=True), pd.to_datetime(end, utc=True),
                                   freq="5min", inclusive="left")
 
-    # The Gamma API lets us ask for up to 100 markets in one call.
     rows = []
     for i in range(0, len(window_starts), 100):
         slugs = [btc_5m_slug(w) for w in window_starts[i:i + 100]]
         params = [("slug", s) for s in slugs] + [("closed", "true"), ("limit", 100)]
         for m in get_json(GAMMA_URL + "/markets", params):
-            rows.append({"window_start": pd.Timestamp(m["eventStartTime"]), "winner": find_winner(m)})
+            token_ids = find_token_ids(m)
+            rows.append({
+                "window_start": pd.Timestamp(m["eventStartTime"]),
+                "winner": find_winner(m),
+                "condition_id": m["conditionId"],
+                "up_token_id": token_ids["Up"],
+                "down_token_id": token_ids["Down"],
+            })
 
-    df = pd.DataFrame(rows, columns=["window_start", "winner"]).dropna()
+    columns = ["window_start", "winner", "condition_id", "up_token_id", "down_token_id"]
+    df = pd.DataFrame(rows, columns=columns).dropna()
     return df.sort_values("window_start", ignore_index=True)
 
 
@@ -83,34 +136,32 @@ def get_market(slug):
     token_ids maps each outcome to its token id, e.g. {"Up": "1148...", "Down": "7983..."}.
     """
     m = get_json(GAMMA_URL + "/markets/slug/" + slug)
-
-    # "v2" markets list their token ids in positionIds, older ones in clobTokenIds (JSON text).
-    if m.get("version") == "v2":
-        token_ids = m["positionIds"]
-    else:
-        token_ids = json.loads(m["clobTokenIds"])
-    outcomes = json.loads(m["outcomes"])  # e.g. ["Up", "Down"]
-
     return {
         "question": m["question"],
         "condition_id": m["conditionId"],
         "window_start": pd.Timestamp(m["eventStartTime"]),
         "window_end": pd.Timestamp(m["endDate"]),
         "winner": find_winner(m),
-        "token_ids": {outcome: str(t) for outcome, t in zip(outcomes, token_ids)},
+        "token_ids": find_token_ids(m),
     }
 
 
+# ---------------------------------------------------------------------------
+# Prices (one point per minute)
+# ---------------------------------------------------------------------------
+
 def get_price_history(token_id, start, end):
     """
-    Get the price of one token from the CLOB API, one point per minute.
+    Get the price of one token between start and end, one point per minute.
 
+    Careful: each point can be 30-60 seconds old, which is a long time in these markets.
+    Use get_trades() if you need the price at an exact moment.
     Returns a DataFrame with columns: timestamp, price.
     """
     params = {
         "market": token_id,
-        "startTs": int(start.timestamp()),
-        "endTs": int(end.timestamp()),
+        "startTs": int(pd.to_datetime(start, utc=True).timestamp()),
+        "endTs": int(pd.to_datetime(end, utc=True).timestamp()),
         "fidelity": 1,  # minutes between points
     }
     history = get_json(CLOB_URL + "/prices-history", params)["history"]
@@ -123,7 +174,7 @@ def get_price_history(token_id, start, end):
 
 def get_btc_5m_prices(window_start, minutes_before=0):
     """
-    Get the "Up" and "Down" prices of one Bitcoin 5-minute market, one point per minute.
+    Get the "Up" and "Down" prices of one market, one point per minute.
 
     The prices go from minutes_before the window starts until the window ends.
     Returns a DataFrame with columns: timestamp, up, down.
@@ -142,33 +193,50 @@ def get_btc_5m_prices(window_start, minutes_before=0):
         columns={"price_up": "up", "price_down": "down"})
 
 
+# ---------------------------------------------------------------------------
+# Trades (every single trade, to the second)
+# ---------------------------------------------------------------------------
+
 def get_trades(condition_id):
     """
-    Get every trade in one market from the Data API (to the second, much finer than prices).
+    Get every trade in one market (often 1000+ trades per 5-minute market).
 
-    Returns a DataFrame with columns: timestamp, outcome, side, price, size, sorted by time.
+    Returns a DataFrame sorted by time, with columns:
+      timestamp = when the trade happened (to the second)
+      outcome   = "Up" or "Down" (which token was traded)
+      side      = "BUY" or "SELL"
+      price     = price of that token (0-1)
+      size      = number of tokens
+      up_price  = the same trade as a price of "Up" (a Down trade at 0.30 = Up at 0.70)
     We keep no information about who traded.
     """
-    # The API gives at most 1000 trades per call, so we ask page by page.
+    # The API gives at most 1000 trades per call. Each answer tells us where the next page starts.
     trades = []
+    params = {"condition": condition_id, "limit": 1000}
     while True:
-        params = {"market": condition_id, "limit": 1000, "offset": len(trades)}
-        page = get_json("https://data-api.polymarket.com/trades", params)
-        trades += page
-        if len(page) < 1000:
+        answer = get_json(DATA_URL + "/v2/trades", params)
+        trades += answer["data"]
+        if not answer["pagination"]["has_more"]:
             break
+        params["cursor"] = answer["pagination"]["next_cursor"]
 
     df = pd.DataFrame(trades, columns=["timestamp", "outcome", "side", "price", "size"])
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s", utc=True)
+    df["up_price"] = df["price"].where(df["outcome"] == "Up", 1 - df["price"])
     return df.sort_values("timestamp", ignore_index=True)
 
 
+# ---------------------------------------------------------------------------
+# Order book (only while the market is open)
+# ---------------------------------------------------------------------------
+
 def get_order_book(token_id):
     """
-    Get the current order book of one token from the CLOB API.
+    Get the current order book of one token.
 
-    Only works while the market is open (closed markets give a 404 error).
-    Returns a DataFrame with columns: side, price, size.
+    Only works while the market is open (closed markets give a 404 error),
+    so old order books cannot be downloaded: you must save them yourself, live.
+    Returns a DataFrame with columns: side ("bid" or "ask"), price, size.
     """
     book = get_json(CLOB_URL + "/book", {"token_id": token_id})
 
